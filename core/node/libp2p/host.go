@@ -2,6 +2,7 @@ package libp2p
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/libp2p/go-libp2p"
 	host "github.com/libp2p/go-libp2p-core/host"
@@ -10,10 +11,12 @@ import (
 	routing "github.com/libp2p/go-libp2p-core/routing"
 	record "github.com/libp2p/go-libp2p-record"
 	routedhost "github.com/libp2p/go-libp2p/p2p/host/routed"
-	"go.uber.org/fx"
+	ma "github.com/multiformats/go-multiaddr"
 
 	"github.com/ipfs/go-ipfs/core/node/helpers"
 	"github.com/ipfs/go-ipfs/repo"
+
+	"go.uber.org/fx"
 )
 
 type P2PHostIn struct {
@@ -43,9 +46,21 @@ func Host(mctx helpers.MetricsCtx, lc fx.Lifecycle, params P2PHostIn) (out P2PHo
 	}
 
 	ctx := helpers.LifecycleCtx(mctx, lc)
+	cfg, err := params.Repo.Config()
+	if err != nil {
+		return out, err
+	}
+	var bootstrappers []ma.Multiaddr
+	for _, addrStr := range cfg.Bootstrap {
+		addr, err := ma.NewMultiaddr(addrStr)
+		if err != nil {
+			return out, fmt.Errorf("failed to parse bootstrap peer address %q: %s", addrStr, err)
+		}
+		bootstrappers = append(bootstrappers, addr)
+	}
 
 	opts = append(opts, libp2p.Routing(func(h host.Host) (routing.PeerRouting, error) {
-		r, err := params.RoutingOption(ctx, h, params.Repo.Datastore(), params.Validator)
+		r, err := params.RoutingOption(ctx, h, params.Repo.Datastore(), params.Validator, bootstrappers...)
 		out.Routing = r
 		return r, err
 	}))
@@ -58,7 +73,7 @@ func Host(mctx helpers.MetricsCtx, lc fx.Lifecycle, params P2PHostIn) (out P2PHo
 	// this code is necessary just for tests: mock network constructions
 	// ignore the libp2p constructor options that actually construct the routing!
 	if out.Routing == nil {
-		r, err := params.RoutingOption(ctx, out.Host, params.Repo.Datastore(), params.Validator)
+		r, err := params.RoutingOption(ctx, out.Host, params.Repo.Datastore(), params.Validator, bootstrappers...)
 		if err != nil {
 			return P2PHostOut{}, err
 		}
