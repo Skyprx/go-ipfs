@@ -6,47 +6,45 @@ import (
 	"testing"
 	"time"
 
-	files "github.com/ipfs/go-ipfs-files"
-	"github.com/ipfs/go-merkledag"
-	uio "github.com/ipfs/go-unixfs/io"
-	"github.com/ipfs/interface-go-ipfs-core/options"
-	"github.com/ipfs/interface-go-ipfs-core/path"
+	"github.com/ipfs/boxo/files"
+	"github.com/ipfs/boxo/ipld/merkledag"
+	uio "github.com/ipfs/boxo/ipld/unixfs/io"
+	"github.com/ipfs/boxo/path"
+	"github.com/ipfs/kubo/core/coreiface/options"
 	"github.com/ipld/go-ipld-prime"
 )
 
-
 func TestPathUnixFSHAMTPartial(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	// Create a node
-	apis, err := NodeProvider{}.MakeAPISwarm(ctx, true, 1)
+	apis, err := NodeProvider{}.MakeAPISwarm(t, ctx, true, true, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	a := apis[0]
 
 	// Setting this after instantiating the swarm so that it's not clobbered by loading the go-ipfs config
-	prevVal := uio.UseHAMTSharding
-	uio.UseHAMTSharding = true
+	prevVal := uio.HAMTShardingSize
+	uio.HAMTShardingSize = 1
 	defer func() {
-		uio.UseHAMTSharding = prevVal
+		uio.HAMTShardingSize = prevVal
 	}()
 
 	// Create and add a sharded directory
 	dir := make(map[string]files.Node)
 	// Make sure we have at least two levels of sharding
-	for i := 0; i < uio.DefaultShardWidth + 1; i++ {
+	for i := 0; i < uio.DefaultShardWidth+1; i++ {
 		dir[strconv.Itoa(i)] = files.NewBytesFile([]byte(strconv.Itoa(i)))
 	}
 
-	r, err := a.Unixfs().Add(ctx, files.NewMapDirectory(dir), options.Unixfs.Pin(false))
+	r, err := a.Unixfs().Add(ctx, files.NewMapDirectory(dir), options.Unixfs.Pin(false, ""))
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Get the root of the directory
-	nd, err := a.Dag().Get(ctx, r.Cid())
+	nd, err := a.Dag().Get(ctx, r.RootCid())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +54,7 @@ func TestPathUnixFSHAMTPartial(t *testing.T) {
 	pbNode := nd.(*merkledag.ProtoNode)
 
 	// Remove one of the sharded directory blocks
-	if err := a.Block().Rm(ctx, path.IpfsPath(pbNode.Links()[0].Cid)); err != nil {
+	if err := a.Block().Rm(ctx, path.FromCid(pbNode.Links()[0].Cid)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -67,8 +65,13 @@ func TestPathUnixFSHAMTPartial(t *testing.T) {
 	for k := range dir {
 		// The node will go out to the (non-existent) network looking for the missing block. Make sure we're erroring
 		// because we exceeded the timeout on our query
-		timeoutCtx, timeoutCancel := context.WithTimeout(ctx, time.Second * 1)
-		_, err := a.ResolveNode(timeoutCtx, path.Join(r, k))
+		timeoutCtx, timeoutCancel := context.WithTimeout(ctx, time.Second*1)
+		newPath, err := path.Join(r, k)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		_, err = a.ResolveNode(timeoutCtx, newPath)
 		if err != nil {
 			if timeoutCtx.Err() == nil {
 				t.Fatal(err)

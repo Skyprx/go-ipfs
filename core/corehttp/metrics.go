@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"time"
 
-	core "github.com/ipfs/go-ipfs/core"
+	core "github.com/ipfs/kubo/core"
 	"go.opencensus.io/stats/view"
 	"go.opencensus.io/zpages"
 
@@ -51,6 +51,30 @@ func MetricsOpenCensusCollectionOption() ServeOption {
 	}
 }
 
+// MetricsOpenCensusDefaultPrometheusRegistry registers the default prometheus
+// registry as an exporter to OpenCensus metrics. This means that OpenCensus
+// metrics will show up in the prometheus metrics endpoint
+func MetricsOpenCensusDefaultPrometheusRegistry() ServeOption {
+	return func(_ *core.IpfsNode, _ net.Listener, mux *http.ServeMux) (*http.ServeMux, error) {
+		log.Info("Init OpenCensus with default prometheus registry")
+
+		pe, err := ocprom.NewExporter(ocprom.Options{
+			Registry: prometheus.DefaultRegisterer.(*prometheus.Registry),
+			OnError: func(err error) {
+				log.Errorw("OC default registry ERROR", "error", err)
+			},
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		// register prometheus with opencensus
+		view.RegisterExporter(pe)
+
+		return mux, nil
+	}
+}
+
 // MetricsCollectionOption adds collection of net/http-related metrics.
 func MetricsCollectionOption(handlerName string) ServeOption {
 	return func(_ *core.IpfsNode, _ net.Listener, mux *http.ServeMux) (*http.ServeMux, error) {
@@ -63,6 +87,7 @@ func MetricsCollectionOption(handlerName string) ServeOption {
 			Objectives:  map[float64]float64{0.5: 0.05, 0.9: 0.01, 0.99: 0.001},
 		}
 
+		// Legacy metric - new metrics are provided by boxo/gateway as gw_http_responses_total
 		reqCnt := prometheus.NewCounterVec(
 			prometheus.CounterOpts{
 				Namespace:   opts.Namespace,
@@ -127,20 +152,18 @@ func MetricsCollectionOption(handlerName string) ServeOption {
 	}
 }
 
-var (
-	peersTotalMetric = prometheus.NewDesc(
-		prometheus.BuildFQName("ipfs", "p2p", "peers_total"),
-		"Number of connected peers",
-		[]string{"transport"},
-		nil,
-	)
+var peersTotalMetric = prometheus.NewDesc(
+	prometheus.BuildFQName("ipfs", "p2p", "peers_total"),
+	"Number of connected peers",
+	[]string{"transport"},
+	nil,
 )
 
 type IpfsNodeCollector struct {
 	Node *core.IpfsNode
 }
 
-func (_ IpfsNodeCollector) Describe(ch chan<- *prometheus.Desc) {
+func (IpfsNodeCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- peersTotalMetric
 }
 
@@ -160,9 +183,18 @@ func (c IpfsNodeCollector) PeersTotalValues() map[string]float64 {
 	if c.Node.PeerHost == nil {
 		return vals
 	}
-	for _, conn := range c.Node.PeerHost.Network().Conns() {
+	for _, peerID := range c.Node.PeerHost.Network().Peers() {
+		// Each peer may have more than one connection (see for an explanation
+		// https://github.com/libp2p/go-libp2p-swarm/commit/0538806), so we grab
+		// only one, the first (an arbitrary and non-deterministic choice), which
+		// according to ConnsToPeer is the oldest connection in the list
+		// (https://github.com/libp2p/go-libp2p-swarm/blob/v0.2.6/swarm.go#L362-L364).
+		conns := c.Node.PeerHost.Network().ConnsToPeer(peerID)
+		if len(conns) == 0 {
+			continue
+		}
 		tr := ""
-		for _, proto := range conn.RemoteMultiaddr().Protocols() {
+		for _, proto := range conns[0].RemoteMultiaddr().Protocols() {
 			tr = tr + "/" + proto.Name
 		}
 		vals[tr] = vals[tr] + 1
